@@ -1,0 +1,50 @@
+name: Mirror Digita Carta Discussion
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 * * * *"
+
+permissions:
+  discussions: read
+  contents: write
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read discussion 1
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p community
+          gh api graphql \
+            -f owner="${{ github.repository_owner }}" \
+            -f repo="${{ github.event.repository.name }}" \
+            -F number=1 \
+            -f query='query($owner: String!, $repo: String!, $number: Int!) { repository(owner: $owner, name: $repo) { discussion(number: $number) { title url body updatedAt comments(first: 100) { totalCount nodes { author { login } body createdAt url } } } } }' \
+            > /tmp/digita-discussion.json
+          jq -r '
+            .data.repository.discussion as $d |
+            if $d == null then error("Discussion #1 not found") else
+              "# " + $d.title + "\n\n" +
+              "Source: " + $d.url + "\n\n" +
+              "Last updated: " + $d.updatedAt + "\n\n" +
+              "## Opening post\n\n" + $d.body + "\n\n" +
+              "## Comments (" + ($d.comments.totalCount|tostring) + ")\n\n" +
+              ([ $d.comments.nodes[] |
+                  "### @" + (.author.login // "unknown") + " — " + .createdAt + "\n\n" +
+                  .body + "\n\nSource: " + .url + "\n\n"
+               ] | join("\n"))
+            end
+          ' /tmp/digita-discussion.json > community/discussion-1.md
+      - name: Save snapshot when changed
+        run: |
+          git add community/discussion-1.md
+          if ! git diff --cached --quiet; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "Mirror constitutional convention discussion"
+            git push
+          fi
