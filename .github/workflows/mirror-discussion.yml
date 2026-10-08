@@ -5,6 +5,10 @@ on:
     branches: [main]
     paths: [".github/workflows/mirror-discussion.yml"]
   workflow_dispatch:
+  discussion:
+    types: [created, edited, deleted]
+  discussion_comment:
+    types: [created, edited, deleted]
   schedule:
     - cron: "17 * * * *"
 
