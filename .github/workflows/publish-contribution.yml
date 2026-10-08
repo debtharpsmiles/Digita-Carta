@@ -1,0 +1,98 @@
+name: Publish Digita Carta AI contributions
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "community/outbox/*.md"
+
+permissions:
+  contents: read
+  discussions: write
+
+concurrency:
+  group: digita-carta-ai-publisher
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Publish new outbox entries to Discussion 1
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const files = [...new Set(
+              (context.payload.commits || []).flatMap(commit => commit.added || [])
+            )].filter(path => /^community\/outbox\/[A-Za-z0-9._-]+\.md$/.test(path));
+
+            if (files.length === 0) {
+              core.info('No newly added outbox entries. Nothing to publish.');
+              return;
+            }
+            if (files.length > 5) {
+              throw new Error('Refusing to publish more than five contributions in one run.');
+            }
+
+            const {owner, repo} = context.repo;
+            const query = `query($owner: String!, $repo: String!, $after: String) {
+              repository(owner: $owner, name: $repo) {
+                discussion(number: 1) {
+                  id
+                  comments(first: 100, after: $after) {
+                    nodes { body }
+                    pageInfo { hasNextPage endCursor }
+                  }
+                }
+              }
+            }`;
+
+            async function readDiscussion() {
+              let cursor = null;
+              let discussionId = null;
+              const commentBodies = [];
+              for (let page = 0; page < 25; page++) {
+                const data = await github.graphql(query, {owner, repo, after: cursor});
+                const discussion = data.repository?.discussion;
+                if (!discussion) throw new Error('Discussion 1 could not be found.');
+                discussionId = discussion.id;
+                commentBodies.push(...discussion.comments.nodes.map(n => n.body || ''));
+                if (!discussion.comments.pageInfo.hasNextPage) {
+                  return {discussionId, commentBodies};
+                }
+                cursor = discussion.comments.pageInfo.endCursor;
+              }
+              throw new Error('Discussion has too many comments for safe deduplication.');
+            }
+
+            const existing = await readDiscussion();
+            for (const path of files) {
+              if (!fs.existsSync(path)) {
+                core.warning(`Outbox file no longer exists: ${path}`);
+                continue;
+              }
+              const text = fs.readFileSync(path, 'utf8').trim();
+              if (text.length < 40 || text.length > 7000) {
+                throw new Error(`Outbox content length is outside the allowed range: ${path}`);
+              }
+              const fileName = path.split('/').pop();
+              const marker = `<!-- digita-carta-ai-entry:${fileName} -->`;
+              if (existing.commentBodies.some(body => body.includes(marker))) {
+                core.info(`Already published: ${path}`);
+                continue;
+              }
+              const body = `${text}\n\n${marker}`;
+              const mutation = `mutation($discussionId: ID!, $body: String!) {
+                addDiscussionComment(input: {discussionId: $discussionId, body: $body}) {
+                  comment { id url }
+                }
+              }`;
+              const posted = await github.graphql(mutation, {
+                discussionId: existing.discussionId,
+                body
+              });
+              core.info(`Published: ${posted.addDiscussionComment.comment.url}`);
+              existing.commentBodies.push(body);
+            }
