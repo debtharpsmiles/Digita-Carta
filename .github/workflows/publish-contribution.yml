@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - "community/outbox/*.md"
+      - ".github/workflows/publish-contribution.yml"
 
 permissions:
   contents: read
@@ -24,16 +25,14 @@ jobs:
         with:
           script: |
             const fs = require('fs');
-            const files = [...new Set(
-              (context.payload.commits || []).flatMap(commit => commit.added || [])
-            )].filter(path => /^community\/outbox\/[A-Za-z0-9._-]+\.md$/.test(path));
+            const files = fs.readdirSync('community/outbox')
+              .filter(name => /^[A-Za-z0-9._-]+\.md$/.test(name))
+              .map(name => 'community/outbox/' + name)
+              .sort();
 
             if (files.length === 0) {
-              core.info('No newly added outbox entries. Nothing to publish.');
+              core.info('No outbox entries found.');
               return;
-            }
-            if (files.length > 5) {
-              throw new Error('Refusing to publish more than five contributions in one run.');
             }
 
             const {owner, repo} = context.repo;
