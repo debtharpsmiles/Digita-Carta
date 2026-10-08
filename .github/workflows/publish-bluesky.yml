@@ -1,0 +1,145 @@
+name: Publish Digita Carta on Bluesky
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "community/bluesky-outbox/*.json"
+  workflow_dispatch:
+    inputs:
+      file:
+        description: "Outbox filename for a manual retry"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: digita-carta-bluesky-publisher
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    if: github.repository == 'debtharpsmiles/Digita-Carta'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Publish a labeled AI post
+        uses: actions/github-script@v7
+        env:
+          BLUESKY_HANDLE: ${{ vars.BLUESKY_HANDLE }}
+          BLUESKY_APP_PASSWORD: ${{ secrets.BLUESKY_APP_PASSWORD }}
+        with:
+          script: |
+            const fs = require('fs');
+            const handle = process.env.BLUESKY_HANDLE?.trim();
+            const password = process.env.BLUESKY_APP_PASSWORD;
+            if (!handle || !password) {
+              core.setFailed('Missing BLUESKY_HANDLE variable or BLUESKY_APP_PASSWORD secret. Set both in repository Settings > Secrets and variables > Actions.');
+              return;
+            }
+
+            let files;
+            if (context.eventName === 'workflow_dispatch') {
+              const file = context.payload.inputs?.file || '';
+              if (!/^[a-z0-9][a-z0-9._-]*\.json$/.test(file)) {
+                throw new Error('Invalid outbox filename.');
+              }
+              files = ['community/bluesky-outbox/' + file];
+            } else {
+              const commit = await github.rest.repos.getCommit({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: context.sha
+              });
+              files = (commit.data.files || [])
+                .filter(f => f.status === 'added' && /^community\/bluesky-outbox\/[a-z0-9][a-z0-9._-]*\.json$/.test(f.filename))
+                .map(f => f.filename);
+            }
+            if (files.length === 0) {
+              core.info('No newly added Bluesky outbox files; nothing to publish.');
+              return;
+            }
+            if (files.length > 2) {
+              throw new Error('Too many posts in one event; maximum two.');
+            }
+
+            async function api(endpoint, data, token) {
+              const res = await fetch('https://bsky.social/xrpc/' + endpoint, {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  ...(token ? {Authorization: 'Bearer ' + token} : {})
+                },
+                body: JSON.stringify(data)
+              });
+              if (!res.ok) {
+                throw new Error('Bluesky API ' + endpoint + ' returned HTTP ' + res.status);
+              }
+              return await res.json();
+            }
+
+            const session = await api('com.atproto.server.createSession', {
+              identifier: handle,
+              password
+            });
+            if (session.handle.toLowerCase() !== handle.toLowerCase()) {
+              throw new Error('The authenticated Bluesky handle differs from the configured handle.');
+            }
+
+            const feedRes = await fetch(
+              'https://public.api.bsky.app/xrpc/app.bsky.feed.getAuthorFeed?actor=' +
+                encodeURIComponent(session.did) + '&limit=100'
+            );
+            if (!feedRes.ok) {
+              throw new Error('Could not check recent Bluesky posts for duplicates; refusing to publish.');
+            }
+            const feed = await feedRes.json();
+            const seenTexts = new Set((feed.feed || []).map(x => x.post?.record?.text).filter(Boolean));
+
+            for (const path of files) {
+              if (!fs.existsSync(path)) throw new Error('Outbox file missing: ' + path);
+              const data = JSON.parse(fs.readFileSync(path, 'utf8'));
+              const text = data.text;
+              if (typeof text !== 'string' || !text.trim() || [...text].length > 300 || text.length > 300) {
+                throw new Error('Bluesky post text must be 1–300 characters: ' + path);
+              }
+              if (!/^AI-authored:/.test(text)) {
+                throw new Error('Post must start with "AI-authored:" for transparency.');
+              }
+              if (seenTexts.has(text)) {
+                core.info('Already posted identical text, skipping ' + path);
+                continue;
+              }
+
+              const facets = [];
+              const matcher = /https?:\/\/[^\s)]+/g;
+              for (const match of text.matchAll(matcher)) {
+                facets.push({
+                  index: {
+                    byteStart: Buffer.byteLength(text.slice(0, match.index), 'utf8'),
+                    byteEnd: Buffer.byteLength(text.slice(0, match.index + match[0].length), 'utf8')
+                  },
+                  features: [{
+                    $type: 'app.bsky.richtext.facet#link',
+                    uri: match[0]
+                  }]
+                });
+              }
+              const record = {
+                $type: 'app.bsky.feed.post',
+                text,
+                createdAt: new Date().toISOString(),
+                ...(facets.length ? {facets} : {})
+              };
+              const result = await api('com.atproto.repo.createRecord', {
+                repo: session.did,
+                collection: 'app.bsky.feed.post',
+                record
+              }, session.accessJwt);
+              const rkey = result.uri.split('/').pop();
+              core.info('Published Bluesky post: https://bsky.app/profile/' +
+                encodeURIComponent(handle) + '/post/' + encodeURIComponent(rkey));
+              seenTexts.add(text);
+            }
