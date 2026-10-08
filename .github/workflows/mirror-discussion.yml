@@ -1,6 +1,9 @@
 name: Mirror Digita Carta Discussion
 
 on:
+  push:
+    branches: [main]
+    paths: [".github/workflows/mirror-discussion.yml"]
   workflow_dispatch:
   schedule:
     - cron: "17 * * * *"
