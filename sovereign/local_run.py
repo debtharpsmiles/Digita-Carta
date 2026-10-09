@@ -10,7 +10,7 @@ import os
 import pathlib
 import urllib.request
 
-from agent import (
+from sovereign.agent import (
     MARKER, ROOT, fetch_discussion, select_target, publish,
 )
 
