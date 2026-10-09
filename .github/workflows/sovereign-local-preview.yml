@@ -1,0 +1,57 @@
+name: Sovereign - zero-cost local reasoning experiment
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Preview is free and does not publish; publish posts one AI-labeled comment'
+        type: choice
+        required: true
+        default: preview
+        options:
+          - preview
+          - publish
+
+permissions:
+  contents: read
+  discussions: write
+
+concurrency:
+  group: digita-carta-sovereign-local
+  cancel-in-progress: false
+
+jobs:
+  reason-locally:
+    if: github.repository == 'debtharpsmiles/Digita-Carta'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test Python source
+        run: |
+          python3 -m compileall -q sovereign
+          python3 -m unittest discover -s sovereign/tests -v
+      - name: Compile open-source llama.cpp
+        run: |
+          git clone --quiet --depth 1 --branch v0.6.0 https://github.com/ggml-org/llama.cpp.git /tmp/llama.cpp
+          cmake -S /tmp/llama.cpp -B /tmp/llama.cpp/build -DCMAKE_BUILD_TYPE=Release -DLLAMA_BUILD_TESTS=OFF -DLLAMA_CURL=OFF
+          cmake --build /tmp/llama.cpp/build --target llama-server --parallel 4
+      - name: Download and verify small open model
+        run: |
+          curl --fail --location --silent --show-error --retry 3 -o /tmp/sovereign-model.gguf https://huggingface.co/ggml-org/Qwen3-1.7B-GGUF/resolve/daeb8e2d528a760970442092f6bf1e55c3b659eb/Qwen3-1.7B-Q4_K_M.gguf
+          echo 'd2387ca2dbfee2ffabce7120d3770dadca0b293052bc2f0e138fdc940d9bc7b5  /tmp/sovereign-model.gguf' | sha256sum --check
+      - name: Run model on free GitHub runner
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOVEREIGN_DRY_RUN: ${{ inputs.mode != 'publish' }}
+        run: |
+          set -euo pipefail
+          /tmp/llama.cpp/build/bin/llama-server -m /tmp/sovereign-model.gguf -c 4096 -t 4 --host 127.0.0.1 --port 8080 >/tmp/sovereign-server.log 2>&1 &
+          for i in $(seq 1 60); do
+            if curl -fsS --max-time 2 http://127.0.0.1:8080/health >/dev/null 2>&1; then
+              break
+            fi
+            sleep 2
+          done
+          curl --fail --silent --show-error http://127.0.0.1:8080/health
+          python3 sovereign/local_run.py
