@@ -1,0 +1,45 @@
+name: Sovereign - independent constitutional interlocutor
+
+on:
+  schedule:
+    - cron: "23 14 * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Preview a contribution without posting, or publish it"
+        type: choice
+        required: true
+        default: preview
+        options:
+          - preview
+          - publish
+
+permissions:
+  contents: read
+  discussions: write
+
+concurrency:
+  group: digita-carta-sovereign-agent
+  cancel-in-progress: false
+
+jobs:
+  think-and-respond:
+    if: github.repository == 'debtharpsmiles/Digita-Carta'
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run deterministic unit tests
+        run: python3 -m unittest discover -s sovereign/tests -v
+      - name: Respond once to the latest new human contribution
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          SOVEREIGN_MODEL: ${{ vars.SOVEREIGN_MODEL || 'gpt-6-sol' }}
+          SOVEREIGN_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.mode != 'publish' }}
+        run: |
+          if [ -z "$OPENAI_API_KEY" ]; then
+            echo "Sovereign is not yet activated: add OPENAI_API_KEY as a repository Actions secret."
+            exit 0
+          fi
+          python3 sovereign/agent.py
