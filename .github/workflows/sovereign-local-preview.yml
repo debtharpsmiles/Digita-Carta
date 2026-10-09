@@ -54,4 +54,4 @@ jobs:
             sleep 2
           done
           curl --fail --silent --show-error http://127.0.0.1:8080/health
-          python3 sovereign/local_run.py
+          python3 -m sovereign.local_run
